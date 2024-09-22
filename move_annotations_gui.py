@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, \
 from PyQt5.QtCore import Qt
 from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtGui import QImage, QPixmap, QColor
+from PyQt5.QtTest import QTest
 import pandas as pd
 import numpy as np
 import cv2
@@ -37,6 +38,11 @@ COLORS = np.array([
 
 
 app = QApplication(sys.argv)
+
+
+# sleep function
+def sleep(seconds):
+    QTest.qWait(seconds * 1000)
 
 
 # named tuple for behavior
@@ -113,21 +119,48 @@ class FramesDisplayLabel(QtWidgets.QLabel):
 
     def mousePressEvent(self, event):
         try:
-            self.main._edit_annotation_start(event)
+            self.main.frames_edit_annotation_start(event)
         except Exception as e:
             tb.print_tb(e.__traceback__)
             print(f"Error in callback: {e}")
 
     def mouseReleaseEvent(self, event):
         try:
-            self.main._edit_annotation_end(event)
+            self.main.frames_edit_annotation_end(event)
         except Exception as e:
             tb.print_tb(e.__traceback__)
             print(f"Error in callback: {e}")
 
     def mouseMoveEvent(self, event):
         try:
-            self.main._edit_annotation_move(event)
+            self.main.frames_edit_annotation_move(event)
+        except Exception as e:
+            tb.print_tb(e.__traceback__)
+            print(f"Error in callback: {e}")
+
+
+class SingleFrameDisplayLabel(QtWidgets.QLabel):
+    def __init__(self, main):
+        super().__init__()
+        self.main = main  # type: MovieViewer
+        self.setMouseTracking(True)
+
+    def mousePressEvent(self, event):
+        try:
+            if event.button() == QtCore.Qt.LeftButton:
+                value = True
+            elif event.button() == QtCore.Qt.RightButton:
+                value = False
+            else:
+                value = None
+            self.main.edit_annotation_start(self.main.frame_pos, value)
+        except Exception as e:
+            tb.print_tb(e.__traceback__)
+            print(f"Error in callback: {e}")
+
+    def mouseReleaseEvent(self, event):
+        try:
+            self.main.edit_annotation_end()
         except Exception as e:
             tb.print_tb(e.__traceback__)
             print(f"Error in callback: {e}")
@@ -191,7 +224,7 @@ class MovieViewer(QMainWindow):
 
         # Frame data and display
         self.center_frame_mask = None
-        self.single_frame_pos = self.frame_pos = None
+        self.frame_pos = None
         self.frame_stack = self.frame_stack_colored = None
         self.single_frame = self.single_frame_colored = None
 
@@ -200,7 +233,9 @@ class MovieViewer(QMainWindow):
         self.n_behavior = 0
         self.annotations = None  # type: Optional[nd.array] # nframe x nbehavior
         self.current_annotations_file = None
-        self._edit_first_frame = None
+        self._hovered_frame_offset = None  # when mouse pressed, hovered small
+        # frame is enlarged in the single frame display
+        self._edit_first_frame = self._edit_last_frame = None
         self._edit_value = None
         self._edit_prev_values = None
         self.needs_save = False
@@ -218,7 +253,7 @@ class MovieViewer(QMainWindow):
         self.main_layout.addWidget(self.frames_widget)
 
         # Full size current frame display
-        self.single_frame_widget = QtWidgets.QLabel(self)
+        self.single_frame_widget = SingleFrameDisplayLabel(self)
         self.single_frame_widget.setScaledContents(True)
         self.controls_layout.addWidget(self.single_frame_widget, row, 0, 1, 3)
         row += 1
@@ -474,9 +509,9 @@ class MovieViewer(QMainWindow):
         <h1>Check Behavior GUI</h1>
         
         <table>
-            <tr><td>Select behavior in the table to highlight it</td></tr>
-            <tr><td>Edit behavior using mouse in the frames 
-            display</td></tr>
+            <tr><td>Select behavior in the table to highlight and edit 
+            it</td></tr>
+            <tr><td>Edit behavior using mouse in the movie displays</td></tr>
             <tr><td>Jump to previous/next event using buttons or 
             shortcuts</td></tr>
         </table>
@@ -495,7 +530,7 @@ class MovieViewer(QMainWindow):
             <tr><td><b>Up/Down Arrow</b></td><td>Previous/Next line</td></tr>
             <tr><td><b>Page Up/Page Down</b></td><td>Previous/Next page</td></tr>
             <tr><td><b>Home/End</b></td><td>Go to start/end of the movie</td></tr>
-            <tr><td><b>Space</b></td><td>Play/Pause</td></tr>
+            <tr><td><b>Space</b></td><td>Play/Pause movie</td></tr>
             <tr><td><b>N/P</b></td><td>Next/Previous event</td></tr>
             <tr><td><b>H or K</b></td><td>Show this help</td></tr>
             <tr><td><b>Ctrl+S</b></td><td>Save annotations</td></tr>
@@ -618,10 +653,14 @@ class MovieViewer(QMainWindow):
                 self.annotation_colors[:, np.newaxis, :] * 255)
 
         # Frame number changed?
+        if self._hovered_frame_offset is None:
+            single_frame_pos = self.frame_pos
+        else:
+            single_frame_pos = self.frame_pos + self._hovered_frame_offset
         changed_single_frame = (
-                self.displayed_single_frame_pos != self.single_frame_pos)
+                self.displayed_single_frame_pos != single_frame_pos)
         changed_frame = self.displayed_frame_pos != self.frame_pos
-        self.displayed_single_frame_pos = self.single_frame_pos
+        self.displayed_single_frame_pos = single_frame_pos
         self.displayed_frame_pos = self.frame_pos
         if changed_frame:
             # reading will be faster if we are reading frames sequentially
@@ -644,7 +683,7 @@ class MovieViewer(QMainWindow):
 
         # read full-size current frame and display it
         if changed_single_frame:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, self.single_frame_pos)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, single_frame_pos)
             ret, single_frame = self.cap.read()
             if not ret:
                 raise Exception(
@@ -695,7 +734,7 @@ class MovieViewer(QMainWindow):
         if self.annotations is not None:
             # color single frame
             if changed_single_frame or not self.displayed_colors_ok:
-                color = self.annotation_colors[self.single_frame_pos, :]
+                color = self.annotation_colors[single_frame_pos, :]
                 self.single_frame_colored = (
                         self.single_frame + (30 * color).astype(np.uint8))
                 single_frame = self.single_frame_colored
@@ -788,9 +827,7 @@ class MovieViewer(QMainWindow):
                 time_time = time.time()
                 elapsed = time_time - tick
                 frame_step = int(elapsed / period) + 1
-                while time.time() - tick < frame_step * period:
-                    time.sleep(min(.01, frame_step * period - elapsed))
-                    app.processEvents()
+                sleep(frame_step * period - elapsed)
 
         self.play_button.setChecked(False)
         self.play_button.setText("Play Movie")
@@ -800,11 +837,19 @@ class MovieViewer(QMainWindow):
         self.set_frame(value, update_slider=False)
 
     def set_frame(self, frame_pos, update_slider=True):
+        # set the frame position
         self.frame_pos = np.clip(frame_pos, 0, self.n_frame-1)
         self.frame_pos_label.setText(f"Frame: {self.frame_pos}")
-        self.single_frame_pos = self.frame_pos
         if update_slider:
             self.time_slider.setValue(self.frame_pos)
+
+        # edit annotation
+        if self._edit_first_frame is not None:
+            last_frame = self.frame_pos + self._hovered_frame_offset
+            if last_frame != self._edit_last_frame:
+                self.edit_annotation(last_frame)
+
+        # update display
         self.update_display()
     # endregion Movie updates
 
@@ -993,89 +1038,126 @@ class MovieViewer(QMainWindow):
             item = self.behavior_selection.item(idx, 1)
             item.setBackground(q_color)
 
-    def _edit_annotation_start(self, event: QtGui.QMouseEvent):
-        # no current behavior?
-        behavior = self.current_behavior
-
+    def frames_edit_annotation_start(self, event: QtGui.QMouseEvent):
         # Get the coordinates of the mouse click
         x = event.pos().x()
         y = event.pos().y()
 
-        # Add previous value to undo stack
-        self.undo_stack.append(self.annotations.copy())
-        self.undo_button.setEnabled(True)
-
         # Start a selection
-        self._edit_first_frame = self.point_to_frame(x, y)
-        if behavior is None or event.button() == QtCore.Qt.MiddleButton:
-            self._edit_prev_values = None
+        frame = self.point_to_frame(x, y)
+        if event.button() == QtCore.Qt.LeftButton:
+            value = True
+        elif event.button() == QtCore.Qt.RightButton:
+            value = False
         else:
-            self._edit_value = (event.button() == QtCore.Qt.LeftButton)
-            self._edit_prev_values = self.annotations[:, behavior].copy()
-        self.edit_annotation(self._edit_first_frame)
+            value = None
+        self.edit_annotation_start(frame, value)
 
-    def _edit_annotation_move(self, event: QtGui.QMouseEvent):
-        if self._edit_first_frame is None:
+    def frames_edit_annotation_move(self, event: QtGui.QMouseEvent):
+        if self._hovered_frame_offset is None:
+            # if no hovered frame is set, this means that the mouse is not
+            # pressed, so neither hovering nor annotation editing is active
             return
 
-        # interrupt scrolling if any
-        self._scrolling_while_edit = False
-
+        # update selection or simple hover
+        x = event.pos().x()
         y = event.pos().y()
+        frame = self.point_to_frame(x, y)
+        self.edit_annotation_move(frame)
 
-        scroll_limit = 50
+        # if already scrolling, continue scrolling
+
+        # check if scrolling is needed
+        scroll_limit = 25
         if y < scroll_limit:
-            self._scrolling_while_edit = -1
+            scroll = -1
         elif y > self.frames_widget.height() - scroll_limit:
-            self._scrolling_while_edit = 1
+            scroll = 1
+        else:
+            scroll = None
 
-        repeat = True
-        while repeat:
-            # scroll?
-            if self._scrolling_while_edit:
-                self.move_frame('line', self._scrolling_while_edit)
+        if scroll and self._scrolling_while_edit:
+            # already scrolling in another call to this function, do nothing
+            return
+        else:
+            # this can trigger new scroll, stop previous scrolling, or do nothing
+            self._scrolling_while_edit = scroll
 
-            # update selection
-            x = event.pos().x()
-            frame = self.point_to_frame(x, y)
-            self.edit_annotation(frame)
+        while self._scrolling_while_edit:
+            # this while loop will be interrupted by a new mouseMoveEvent or
+            # by self.frames_edit_annotation_end upon mouse release
 
-            # repeat if scrolling and no new mouseMoveEvent occurred
-            if self._scrolling_while_edit:
-                app.processEvents()
-                time.sleep(.15)
-                app.processEvents()
-                repeat = bool(self._scrolling_while_edit)
-            else:
-                repeat = False
+            # moving frame will make the mouse select a new frame,
+            # set_frame will automatically edit the annotation accordingly
+            self.move_frame('line', self._scrolling_while_edit)
 
-    def _edit_annotation_end(self, last_frame):
-        self._edit_first_frame = None
+            # small wait between scrolls (new mouseMoveEvent or mouse release
+            # can interrupt the loop in the meantime)
+            sleep(.15)
+
+    def frames_edit_annotation_end(self, event: QtGui.QMouseEvent):
         # interrupt scrolling if any
         self._scrolling_while_edit = False
-        # revert to showing current frame enlarged
-        self.single_frame_pos = self.frame_pos
+        # end editing
+        self.edit_annotation_end()
 
+    def edit_annotation_start(self, first_frame, value):
+        # activate frame hovering
+        self._hovered_frame_offset = first_frame - self.frame_pos
+        # no annotation if no behavior selected
+        if self.current_behavior is None or value is None:
+            # update display for the frame hovering
+            self.update_display()
+            return
+        # add previous value to undo stack
+        self.undo_stack.append(self.annotations.copy())
+        self.undo_button.setEnabled(True)
+        # first frame of the selection
+        self._edit_first_frame = first_frame
+        # value to set
+        self._edit_value = value
+        # previous values
+        behavior = self.current_behavior
+        self._edit_prev_values = self.annotations[:, behavior].copy()
+        # start editing annotation for the first frame alone
+        self.edit_annotation(self._edit_first_frame)
+
+    def edit_annotation_end(self):
+        # stop frame hovering
+        self._hovered_frame_offset = None
+        # stop annotation editing
+        self._edit_first_frame = None
+        self._edit_prev_values = None
+        # revert to showing current frame enlarged
         self.update_display()
 
-    def edit_annotation(self, last_frame):
-        # no current behavior?
-        behavior = self.current_behavior
-
-        # show selected frame enlarged
-        self.single_frame_pos = last_frame
+    def edit_annotation_move(self, last_frame):
+        # update hovered frame
+        self._hovered_frame_offset = last_frame - self.frame_pos
 
         # edit current behavior's annotation
         if self._edit_value is not None:
-            first_frame = self._edit_first_frame
-            value = self._edit_value
-            values = self._edit_prev_values.copy()
-            if last_frame < first_frame:
-                first_frame, last_frame = last_frame, first_frame
-            values[first_frame:last_frame+1] = value
-            self.annotations[:, behavior] = values
-            self.displayed_colors_ok = False
-            self.update_needs_save(True)
+            self.edit_annotation(last_frame)
+
+        # update display
+        self.update_display()
+
+    def edit_annotation(self, last_frame):
+        # no annotation active?
+        behavior = self.current_behavior
+        if behavior is None or self._edit_value is None:
+            return
+
+        # edit current behavior's annotation
+        first_frame = self._edit_first_frame
+        self._edit_last_frame = last_frame
+        values = self._edit_prev_values.copy()
+        if last_frame < first_frame:
+            first_frame, last_frame = last_frame, first_frame
+        values[first_frame:last_frame+1] = self._edit_value
+        self.annotations[:, behavior] = values
+        self.displayed_colors_ok = False
+        self.update_needs_save(True)
 
         # update display
         self.update_display()
