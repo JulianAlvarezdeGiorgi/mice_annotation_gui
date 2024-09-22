@@ -42,7 +42,7 @@ app = QApplication(sys.argv)
 
 # sleep function
 def sleep(seconds):
-    QTest.qWait(seconds * 1000)
+    QTest.qWait(int(seconds * 1000))
 
 
 # named tuple for behavior
